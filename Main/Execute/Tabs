@@ -1,0 +1,133 @@
+local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/SkyeMoz/LGLMenu/refs/heads/main/Library"))()
+
+local Window = Library:CreateWindow({
+    Title = "Moz Studio",
+    Subtitle = "Visible Aim Assist"
+})
+
+Window:CreateToggle("Visible Aim Assist", false, function(state)
+
+    if state then
+
+        loadstring([[
+--// MOZ STUDIO - VISIBLE AIM ASSIST + AUTO TAP
+--// ONLY TARGETS PLAYERS YOU CAN SEE
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local Camera = workspace.CurrentCamera
+
+local LocalPlayer = Players.LocalPlayer
+
+_G.MOZ_AIM = true
+
+local AUTO_TAP = true
+local MAX_DISTANCE = math.huge
+local SMOOTHNESS = 1
+local TAP_DELAY = 0.08
+
+local LastTap = 0
+
+local function IsVisible(targetPart)
+	local origin = Camera.CFrame.Position
+	local direction = (targetPart.Position - origin)
+
+	local rayParams = RaycastParams.new()
+	rayParams.FilterType = Enum.RaycastFilterType.Blacklist
+	rayParams.FilterDescendantsInstances = {
+		LocalPlayer.Character
+	}
+
+	local result = workspace:Raycast(origin, direction, rayParams)
+
+	if result then
+		return result.Instance:IsDescendantOf(targetPart.Parent)
+	end
+
+	return true
+end
+
+local function GetNearestVisiblePlayer()
+	local nearestPlayer = nil
+	local shortestDistance = math.huge
+
+	local localCharacter = LocalPlayer.Character
+	if not localCharacter then return nil end
+
+	local localRoot = localCharacter:FindFirstChild("HumanoidRootPart")
+	if not localRoot then return nil end
+
+	for _, player in pairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer then
+			local character = player.Character
+			local humanoid = character and character:FindFirstChild("Humanoid")
+			local root = character and character:FindFirstChild("HumanoidRootPart")
+			local head = character and character:FindFirstChild("Head")
+
+			if humanoid and root and head and humanoid.Health > 0 then
+				local distance = (localRoot.Position - root.Position).Magnitude
+
+				if distance < shortestDistance and distance <= MAX_DISTANCE then
+					if IsVisible(head) then
+						shortestDistance = distance
+						nearestPlayer = player
+					end
+				end
+			end
+		end
+	end
+
+	return nearestPlayer
+end
+
+local function AutoTap()
+	if tick() - LastTap < TAP_DELAY then
+		return
+	end
+
+	LastTap = tick()
+
+	VirtualInputManager:SendMouseButtonEvent(
+		0,0,0,true,game,0
+	)
+
+	VirtualInputManager:SendMouseButtonEvent(
+		0,0,0,false,game,0
+	)
+end
+
+RunService.RenderStepped:Connect(function()
+
+	if not _G.MOZ_AIM then
+		return
+	end
+
+	local target = GetNearestVisiblePlayer()
+
+	if target and target.Character then
+		local head = target.Character:FindFirstChild("Head")
+
+		if head then
+			local camPos = Camera.CFrame.Position
+			local aimCFrame = CFrame.new(camPos, head.Position)
+
+			Camera.CFrame = Camera.CFrame:Lerp(
+				aimCFrame,
+				SMOOTHNESS
+			)
+
+			if AUTO_TAP then
+				AutoTap()
+			end
+		end
+	end
+end)
+]])()
+
+    else
+
+        _G.MOZ_AIM = false
+
+    end
+end)
