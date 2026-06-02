@@ -1,0 +1,749 @@
+--[[
+    ╔══════════════════════════════════════════════════════════════╗
+    ║           MozCraft Loading Screen - LocalScript              ║
+    ║           Created by SkyeMoz / Moz Studio                   ║
+    ║           Version: 2.1 | Polished Edition                   ║
+    ╚══════════════════════════════════════════════════════════════╝
+
+    PLACE THIS SCRIPT IN: StarterPlayerScripts OR StarterGui
+
+    USAGE:
+      Replace "MozCraft.pages.dev/SkyeMoz.lua" at the bottom with your
+      actual script URL before publishing.
+
+    CHANGES v2.1:
+      - Smooth full fade-out on finish (all elements fade cleanly)
+      - Decal images properly sized/fitted (no oversized stretching)
+      - Unified PC & Android sizing via scale-based layout + improved UIScale
+      - Smoother tweens throughout (better easing, refined timing)
+      - Logo entrance animation on load
+      - Cleaner particle system
+--]]
+
+-- ============================================================
+-- SERVICES
+-- ============================================================
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local RunService       = game:GetService("RunService")
+local ContentProvider  = game:GetService("ContentProvider")
+local SoundService     = game:GetService("SoundService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
+
+-- ============================================================
+-- CONFIGURATION
+-- ============================================================
+local CONFIG = {
+    Slides = {
+        {
+            Title    = "MozCraft",
+            Subtitle = nil,
+            Decal    = "rbxassetid://102069765363282",
+        },
+        {
+            Title    = "Made By SkyeMoz",
+            Subtitle = nil,
+            Decal    = "rbxassetid://103979821783938",
+        },
+        {
+            Title    = "Created in Moz Studio",
+            Subtitle = "Credit to @MasterMZ for showcasing the beta version.",
+            Decal    = "rbxassetid://74753299597159",
+        },
+    },
+
+    SplashTexts = {
+        "Generating MozWorld...",
+        "Loading Blocks...",
+        "Preparing Adventure...",
+        "Building Terrain...",
+        "Mining Diamonds...",
+        "Loading Chunks...",
+        "Crafting Experience...",
+        "Smelting Resources...",
+        "Enchanting Items...",
+        "Spawning Mobs...",
+        "Growing Trees...",
+        "Placing Torches...",
+    },
+
+    Stages = {
+        { label = "Loading Assets...",   pct = 0.10 },
+        { label = "Loading Terrain...",  pct = 0.28 },
+        { label = "Loading Blocks...",   pct = 0.45 },
+        { label = "Loading Textures...", pct = 0.63 },
+        { label = "Loading UI...",       pct = 0.80 },
+        { label = "Finalizing...",       pct = 1.00 },
+    },
+
+    -- Timing (seconds)
+    SlideDuration    = 3.2,
+    SplashInterval   = 2.8,
+    StageInterval    = 1.8,
+    FadeTime         = 0.8,    -- bg cross-fade
+    FinishFadeTime   = 1.5,    -- final fade-out
+    ParticleInterval = 0.22,
+
+    -- Colors
+    BgColor        = Color3.fromRGB(6, 6, 10),
+    BarBg          = Color3.fromRGB(28, 28, 38),
+    BarFill        = Color3.fromRGB(82, 196, 106),
+    GlowColor      = Color3.fromRGB(82, 196, 106),
+    TextPrimary    = Color3.fromRGB(255, 255, 255),
+    TextSecondary  = Color3.fromRGB(170, 190, 170),
+    TextAccent     = Color3.fromRGB(120, 220, 140),
+    ParticleColors = {
+        Color3.fromRGB(82,  196, 106),
+        Color3.fromRGB(46,  160, 255),
+        Color3.fromRGB(255, 210, 80),
+        Color3.fromRGB(200, 80,  80),
+        Color3.fromRGB(160, 100, 255),
+    },
+
+    LoadSoundId   = "rbxassetid://9120386954",
+    FinishSoundId = "rbxassetid://4612367613",
+
+    ScriptURL = "https://MozCraft.pages.dev/SkyeMoz.lua",
+}
+
+-- ============================================================
+-- STATE
+-- ============================================================
+local State = {
+    currentSlide = 1,
+    currentStage = 1,
+    progress     = 0,
+    running      = true,
+    bgA          = nil,
+    bgB          = nil,
+    particles    = {},
+}
+
+-- ============================================================
+-- UTILITY
+-- ============================================================
+local function Tween(obj, info, props)
+    local t = TweenService:Create(obj, info, props)
+    t:Play()
+    return t
+end
+
+local function TweenWait(obj, info, props)
+    local t = TweenService:Create(obj, info, props)
+    t:Play()
+    t.Completed:Wait()
+end
+
+local function RandomFrom(t)
+    return t[math.random(1, #t)]
+end
+
+-- ============================================================
+-- UI REFERENCES (filled by CreateUI)
+-- ============================================================
+local ScreenGui, BlurEffect, MainFrame, FadeOverlay
+local BgA, BgB
+local LogoLabel, GlowLabel, SplashLabel, SubtitleLabel
+local StageLabel, BarBack, BarFillObj, PctLabel
+local ParticleContainer, ContentHolder
+
+-- ============================================================
+-- CREATE UI
+-- ============================================================
+local function CreateUI()
+    -- ── Root ──────────────────────────────────────────────
+    ScreenGui = Instance.new("ScreenGui")
+    ScreenGui.Name           = "MozCraftLoading"
+    ScreenGui.ResetOnSpawn   = false
+    ScreenGui.IgnoreGuiInset = true
+    ScreenGui.DisplayOrder   = 999
+    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    ScreenGui.Parent         = PlayerGui
+
+    -- UIScale — scale-based so PC and mobile match 1:1 visually
+    local uiScale = Instance.new("UIScale")
+    uiScale.Parent = ScreenGui
+
+    local function UpdateScale()
+        local vp     = ScreenGui.AbsoluteSize
+        -- Base reference: 1080p height. Everything is sized relative to that.
+        local scale  = math.clamp(math.min(vp.X / 1920, vp.Y / 1080), 0.45, 1.8)
+        uiScale.Scale = scale
+    end
+    UpdateScale()
+    ScreenGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(UpdateScale)
+
+    -- ── Blur ──────────────────────────────────────────────
+    BlurEffect = Instance.new("BlurEffect")
+    BlurEffect.Size   = 0
+    BlurEffect.Parent = game:GetService("Lighting")
+
+    -- ── Dark background frame ──────────────────────────────
+    MainFrame = Instance.new("Frame")
+    MainFrame.Name                   = "MainFrame"
+    MainFrame.Size                   = UDim2.new(1, 0, 1, 0)
+    MainFrame.BackgroundColor3       = CONFIG.BgColor
+    MainFrame.BackgroundTransparency = 1   -- starts transparent, fades in
+    MainFrame.BorderSizePixel        = 0
+    MainFrame.ZIndex                 = 1
+    MainFrame.Parent                 = ScreenGui
+
+    -- ── Background decal A ────────────────────────────────
+    --  Using Fit so the decal is never oversized / cropped weirdly.
+    --  Centered with AspectRatioConstraint to keep proportions correct.
+    BgA = Instance.new("ImageLabel")
+    BgA.Name                 = "BgA"
+    BgA.Size                 = UDim2.new(0.72, 0, 0.72, 0)   -- 72% of screen, centered
+    BgA.Position             = UDim2.new(0.14, 0, 0.14, 0)
+    BgA.AnchorPoint          = Vector2.new(0, 0)
+    BgA.BackgroundTransparency = 1
+    BgA.ImageTransparency    = 0.30
+    BgA.ScaleType            = Enum.ScaleType.Fit
+    BgA.ZIndex               = 2
+    BgA.Image                = CONFIG.Slides[1].Decal
+    BgA.Parent               = MainFrame
+
+    BgB = Instance.new("ImageLabel")
+    BgB.Name                 = "BgB"
+    BgB.Size                 = UDim2.new(0.72, 0, 0.72, 0)
+    BgB.Position             = UDim2.new(0.14, 0, 0.14, 0)
+    BgB.AnchorPoint          = Vector2.new(0, 0)
+    BgB.BackgroundTransparency = 1
+    BgB.ImageTransparency    = 1
+    BgB.ScaleType            = Enum.ScaleType.Fit
+    BgB.ZIndex               = 3
+    BgB.Image                = CONFIG.Slides[1].Decal
+    BgB.Parent               = MainFrame
+
+    State.bgA = BgA
+    State.bgB = BgB
+
+    -- ── Vignette overlay ──────────────────────────────────
+    local vignette = Instance.new("ImageLabel")
+    vignette.Size              = UDim2.new(1, 0, 1, 0)
+    vignette.BackgroundTransparency = 1
+    vignette.Image             = "rbxassetid://6578871358"
+    vignette.ImageColor3       = Color3.fromRGB(0, 0, 0)
+    vignette.ImageTransparency = 0.20
+    vignette.ScaleType         = Enum.ScaleType.Stretch
+    vignette.ZIndex            = 4
+    vignette.Parent            = MainFrame
+
+    -- ── Bottom readability gradient ───────────────────────
+    local bottomGrad = Instance.new("Frame")
+    bottomGrad.Size              = UDim2.new(1, 0, 0.50, 0)
+    bottomGrad.Position          = UDim2.new(0, 0, 0.50, 0)
+    bottomGrad.BackgroundColor3  = Color3.fromRGB(0, 0, 0)
+    bottomGrad.BackgroundTransparency = 0
+    bottomGrad.BorderSizePixel   = 0
+    bottomGrad.ZIndex            = 5
+    bottomGrad.Parent            = MainFrame
+    local bgGrad = Instance.new("UIGradient")
+    bgGrad.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0,   1),
+        NumberSequenceKeypoint.new(0.5, 0.25),
+        NumberSequenceKeypoint.new(1,   0.55),
+    })
+    bgGrad.Rotation = 90
+    bgGrad.Parent   = bottomGrad
+
+    -- ── Particle container ────────────────────────────────
+    ParticleContainer = Instance.new("Frame")
+    ParticleContainer.Size              = UDim2.new(1, 0, 1, 0)
+    ParticleContainer.BackgroundTransparency = 1
+    ParticleContainer.BorderSizePixel   = 0
+    ParticleContainer.ZIndex            = 6
+    ParticleContainer.ClipsDescendants  = false
+    ParticleContainer.Parent            = MainFrame
+
+    -- ── Content holder (all text/bar lives here) ──────────
+    --  100% scale-based so it looks identical on every device.
+    ContentHolder = Instance.new("Frame")
+    ContentHolder.Name              = "Content"
+    ContentHolder.Size              = UDim2.new(0.80, 0, 0.38, 0)
+    ContentHolder.Position          = UDim2.new(0.10, 0, 0.56, 0)
+    ContentHolder.BackgroundTransparency = 1
+    ContentHolder.BorderSizePixel   = 0
+    ContentHolder.ZIndex            = 10
+    ContentHolder.Parent            = MainFrame
+
+    -- ── Glow behind logo ──────────────────────────────────
+    GlowLabel = Instance.new("TextLabel")
+    GlowLabel.Size               = UDim2.new(1.06, 0, 0, 90)
+    GlowLabel.Position           = UDim2.new(-0.03, 0, 0, 0)
+    GlowLabel.BackgroundTransparency = 1
+    GlowLabel.TextColor3         = CONFIG.GlowColor
+    GlowLabel.TextTransparency   = 0.55
+    GlowLabel.Font               = Enum.Font.GothamBold
+    GlowLabel.TextScaled         = true
+    GlowLabel.Text               = CONFIG.Slides[1].Title
+    GlowLabel.ZIndex             = 10
+    GlowLabel.TextStrokeColor3   = CONFIG.GlowColor
+    GlowLabel.TextStrokeTransparency = 0.15
+    GlowLabel.Parent             = ContentHolder
+
+    -- ── Logo title ────────────────────────────────────────
+    LogoLabel = Instance.new("TextLabel")
+    LogoLabel.Size               = UDim2.new(1, 0, 0, 88)
+    LogoLabel.Position           = UDim2.new(0, 0, 0, 0)
+    LogoLabel.BackgroundTransparency = 1
+    LogoLabel.TextColor3         = CONFIG.TextPrimary
+    LogoLabel.Font               = Enum.Font.GothamBold
+    LogoLabel.TextScaled         = true
+    LogoLabel.Text               = CONFIG.Slides[1].Title
+    LogoLabel.TextTransparency   = 1   -- entrance: starts invisible
+    LogoLabel.ZIndex             = 11
+    LogoLabel.TextStrokeColor3   = Color3.fromRGB(0, 0, 0)
+    LogoLabel.TextStrokeTransparency = 0.65
+    LogoLabel.Parent             = ContentHolder
+
+    local logoGrad = Instance.new("UIGradient")
+    logoGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0,   Color3.fromRGB(140, 255, 160)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+        ColorSequenceKeypoint.new(1,   Color3.fromRGB(100, 200, 255)),
+    })
+    logoGrad.Rotation = 45
+    logoGrad.Parent   = LogoLabel
+
+    -- ── Subtitle ──────────────────────────────────────────
+    SubtitleLabel = Instance.new("TextLabel")
+    SubtitleLabel.Size               = UDim2.new(1, 0, 0, 0.06)
+    SubtitleLabel.Position           = UDim2.new(0, 0, 0, 92)
+    SubtitleLabel.BackgroundTransparency = 1
+    SubtitleLabel.TextColor3         = Color3.fromRGB(160, 220, 200)
+    SubtitleLabel.Font               = Enum.Font.Gotham
+    SubtitleLabel.TextScaled         = false
+    SubtitleLabel.TextSize           = 15
+    SubtitleLabel.Text               = ""
+    SubtitleLabel.TextTransparency   = 1
+    SubtitleLabel.ZIndex             = 11
+    SubtitleLabel.TextWrapped        = true
+    SubtitleLabel.TextXAlignment     = Enum.TextXAlignment.Center
+    SubtitleLabel.Parent             = ContentHolder
+
+    -- ── Splash text ───────────────────────────────────────
+    SplashLabel = Instance.new("TextLabel")
+    SplashLabel.Size               = UDim2.new(1, 0, 0, 26)
+    SplashLabel.Position           = UDim2.new(0, 0, 0, 114)
+    SplashLabel.BackgroundTransparency = 1
+    SplashLabel.TextColor3         = CONFIG.TextAccent
+    SplashLabel.Font               = Enum.Font.Gotham
+    SplashLabel.TextScaled         = false
+    SplashLabel.TextSize           = 17
+    SplashLabel.Text               = RandomFrom(CONFIG.SplashTexts)
+    SplashLabel.TextTransparency   = 1   -- entrance: starts invisible
+    SplashLabel.ZIndex             = 11
+    SplashLabel.TextXAlignment     = Enum.TextXAlignment.Center
+    SplashLabel.Parent             = ContentHolder
+
+    -- ── Stage label ───────────────────────────────────────
+    StageLabel = Instance.new("TextLabel")
+    StageLabel.Size               = UDim2.new(1, 0, 0, 22)
+    StageLabel.Position           = UDim2.new(0, 0, 0, 148)
+    StageLabel.BackgroundTransparency = 1
+    StageLabel.TextColor3         = CONFIG.TextSecondary
+    StageLabel.Font               = Enum.Font.Gotham
+    StageLabel.TextScaled         = false
+    StageLabel.TextSize           = 14
+    StageLabel.Text               = CONFIG.Stages[1].label
+    StageLabel.TextTransparency   = 1   -- entrance: starts invisible
+    StageLabel.ZIndex             = 11
+    StageLabel.TextXAlignment     = Enum.TextXAlignment.Center
+    StageLabel.Parent             = ContentHolder
+
+    -- ── Progress bar background ───────────────────────────
+    BarBack = Instance.new("Frame")
+    BarBack.Size              = UDim2.new(1, 0, 0, 12)
+    BarBack.Position          = UDim2.new(0, 0, 0, 180)
+    BarBack.BackgroundColor3  = CONFIG.BarBg
+    BarBack.BackgroundTransparency = 1   -- entrance
+    BarBack.BorderSizePixel   = 0
+    BarBack.ZIndex            = 11
+    BarBack.Parent            = ContentHolder
+    local barCorner = Instance.new("UICorner")
+    barCorner.CornerRadius = UDim.new(1, 0)
+    barCorner.Parent = BarBack
+
+    -- ── Bar fill ──────────────────────────────────────────
+    BarFillObj = Instance.new("Frame")
+    BarFillObj.Size              = UDim2.new(0, 0, 1, 0)
+    BarFillObj.BackgroundColor3  = CONFIG.BarFill
+    BarFillObj.BorderSizePixel   = 0
+    BarFillObj.ZIndex            = 12
+    BarFillObj.Parent            = BarBack
+    local fillCorner = Instance.new("UICorner")
+    fillCorner.CornerRadius = UDim.new(1, 0)
+    fillCorner.Parent = BarFillObj
+    local barGrad = Instance.new("UIGradient")
+    barGrad.Color = ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(82,  196, 106)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(46,  160, 255)),
+    })
+    barGrad.Parent = BarFillObj
+
+    local barGlow = Instance.new("Frame")
+    barGlow.Size              = UDim2.new(1, 0, 0.45, 0)
+    barGlow.Position          = UDim2.new(0, 0, 0.05, 0)
+    barGlow.BackgroundColor3  = Color3.fromRGB(255, 255, 255)
+    barGlow.BackgroundTransparency = 0.72
+    barGlow.BorderSizePixel   = 0
+    barGlow.ZIndex            = 13
+    barGlow.Parent            = BarFillObj
+    local bgc = Instance.new("UICorner")
+    bgc.CornerRadius = UDim.new(1, 0)
+    bgc.Parent = barGlow
+
+    -- ── Percentage label ──────────────────────────────────
+    PctLabel = Instance.new("TextLabel")
+    PctLabel.Size               = UDim2.new(1, 0, 0, 20)
+    PctLabel.Position           = UDim2.new(0, 0, 0, 196)
+    PctLabel.BackgroundTransparency = 1
+    PctLabel.TextColor3         = CONFIG.TextSecondary
+    PctLabel.Font               = Enum.Font.GothamBold
+    PctLabel.TextScaled         = false
+    PctLabel.TextSize           = 12
+    PctLabel.Text               = "0%"
+    PctLabel.TextTransparency   = 1   -- entrance
+    PctLabel.ZIndex             = 11
+    PctLabel.TextXAlignment     = Enum.TextXAlignment.Center
+    PctLabel.Parent             = ContentHolder
+
+    -- ── Full-screen fade overlay (for final fade-out) ─────
+    FadeOverlay = Instance.new("Frame")
+    FadeOverlay.Name                   = "FadeOverlay"
+    FadeOverlay.Size                   = UDim2.new(1, 0, 1, 0)
+    FadeOverlay.BackgroundColor3       = Color3.fromRGB(0, 0, 0)
+    FadeOverlay.BackgroundTransparency = 1   -- invisible until finish
+    FadeOverlay.BorderSizePixel        = 0
+    FadeOverlay.ZIndex                 = 50
+    FadeOverlay.Parent                 = MainFrame
+end
+
+-- ============================================================
+-- ENTRANCE ANIMATION
+-- ============================================================
+local function PlayEntrance()
+    local si  = TweenInfo.new(0.7, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+    local si2 = TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+
+    -- Staggered fade-ins
+    task.spawn(function()
+        Tween(LogoLabel,  si,  { TextTransparency = 0 })
+        task.wait(0.12)
+        Tween(GlowLabel,  si,  { TextTransparency = 0.55 })
+        task.wait(0.12)
+        Tween(SplashLabel, si, { TextTransparency = 0 })
+        task.wait(0.12)
+        Tween(StageLabel,  si, { TextTransparency = 0 })
+        task.wait(0.12)
+        Tween(BarBack, si2, { BackgroundTransparency = 0 })
+        task.wait(0.08)
+        Tween(PctLabel, si, { TextTransparency = 0 })
+    end)
+end
+
+-- ============================================================
+-- PARTICLES
+-- ============================================================
+local function SpawnParticle()
+    local size  = math.random(5, 18)
+    local x     = math.random(0, 100) / 100
+    local color = RandomFrom(CONFIG.ParticleColors)
+
+    local p = Instance.new("Frame")
+    p.Size              = UDim2.new(0, size, 0, size)
+    p.Position          = UDim2.new(x, 0, 1.04, 0)
+    p.BackgroundColor3  = color
+    p.BackgroundTransparency = 0.25
+    p.BorderSizePixel   = 0
+    p.ZIndex            = 7
+    p.Rotation          = math.random(0, 90)
+    p.Parent            = ParticleContainer
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0.15, 0)
+    corner.Parent = p
+
+    local drift    = (math.random(-25, 25) / 1000)
+    local duration = math.random(32, 65) / 10
+
+    Tween(p, TweenInfo.new(duration, Enum.EasingStyle.Linear), {
+        Position             = UDim2.new(x + drift, 0, -0.08 - math.random(0, 25) / 100, 0),
+        Rotation             = p.Rotation + math.random(-160, 160),
+        BackgroundTransparency = 1,
+    })
+
+    table.insert(State.particles, p)
+    task.delay(duration, function()
+        if p and p.Parent then p:Destroy() end
+    end)
+end
+
+local function StartParticles()
+    task.spawn(function()
+        while State.running do
+            SpawnParticle()
+            task.wait(CONFIG.ParticleInterval)
+        end
+    end)
+end
+
+-- ============================================================
+-- LOGO ANIMATIONS
+-- ============================================================
+local function StartLogoAnimations()
+    local floatInfo = TweenInfo.new(2.0, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+
+    local function floatLoop()
+        if not State.running then return end
+        TweenWait(LogoLabel, floatInfo, { Position = UDim2.new(0, 0, 0, 7) })
+        if not State.running then return end
+        TweenWait(LogoLabel, floatInfo, { Position = UDim2.new(0, 0, 0, 0) })
+        if State.running then task.spawn(floatLoop) end
+    end
+    task.spawn(floatLoop)
+
+    local function glowFloat()
+        if not State.running then return end
+        TweenWait(GlowLabel, floatInfo, { Position = UDim2.new(-0.03, 0, 0, 7) })
+        if not State.running then return end
+        TweenWait(GlowLabel, floatInfo, { Position = UDim2.new(-0.03, 0, 0, 0) })
+        if State.running then task.spawn(glowFloat) end
+    end
+    task.spawn(glowFloat)
+
+    local pulseInfo = TweenInfo.new(1.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut)
+    local function glowPulse()
+        if not State.running then return end
+        TweenWait(GlowLabel, pulseInfo, { TextTransparency = 0.22 })
+        if not State.running then return end
+        TweenWait(GlowLabel, pulseInfo, { TextTransparency = 0.75 })
+        if State.running then task.spawn(glowPulse) end
+    end
+    task.spawn(glowPulse)
+end
+
+-- ============================================================
+-- BACKGROUND SLIDE SYSTEM
+-- ============================================================
+local function ChangeBackground()
+    local nextIdx = (State.currentSlide % #CONFIG.Slides) + 1
+    local slide   = CONFIG.Slides[nextIdx]
+
+    State.bgB.Image             = slide.Decal
+    State.bgB.ImageTransparency = 1
+
+    local fadeIn  = TweenInfo.new(CONFIG.FadeTime, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+    local fadeOut = TweenInfo.new(CONFIG.FadeTime, Enum.EasingStyle.Sine, Enum.EasingDirection.In)
+
+    Tween(State.bgB, fadeIn,  { ImageTransparency = 0.30 })
+    TweenWait(State.bgA, fadeOut, { ImageTransparency = 1 })
+
+    -- Swap
+    State.bgA.Image             = slide.Decal
+    State.bgA.ImageTransparency = 0.30
+    State.bgB.ImageTransparency = 1
+    State.currentSlide          = nextIdx
+
+    -- Fade title out → update → fade in
+    local titleFade = TweenInfo.new(0.35, Enum.EasingStyle.Sine)
+    TweenWait(LogoLabel, titleFade, { TextTransparency = 1 })
+    TweenWait(GlowLabel, titleFade, { TextTransparency = 1 })
+
+    LogoLabel.Text = slide.Title
+    GlowLabel.Text = slide.Title
+
+    if slide.Subtitle then
+        SubtitleLabel.Text = slide.Subtitle
+        Tween(SubtitleLabel, TweenInfo.new(0.45, Enum.EasingStyle.Sine), { TextTransparency = 0 })
+    else
+        Tween(SubtitleLabel, TweenInfo.new(0.35, Enum.EasingStyle.Sine), { TextTransparency = 1 })
+    end
+
+    local titleShow = TweenInfo.new(0.50, Enum.EasingStyle.Sine, Enum.EasingDirection.Out)
+    Tween(LogoLabel, titleShow, { TextTransparency = 0 })
+    Tween(GlowLabel, titleShow, { TextTransparency = 0.55 })
+end
+
+local function StartSlideshow()
+    task.spawn(function()
+        while State.running do
+            task.wait(CONFIG.SlideDuration)
+            if State.running then ChangeBackground() end
+        end
+    end)
+end
+
+-- ============================================================
+-- SPLASH ROTATION
+-- ============================================================
+local function StartSplashRotation()
+    task.spawn(function()
+        while State.running do
+            task.wait(CONFIG.SplashInterval)
+            if not State.running then break end
+            local fi = TweenInfo.new(0.28, Enum.EasingStyle.Sine)
+            TweenWait(SplashLabel, fi, { TextTransparency = 1 })
+            SplashLabel.Text = RandomFrom(CONFIG.SplashTexts)
+            TweenWait(SplashLabel, fi, { TextTransparency = 0 })
+        end
+    end)
+end
+
+-- ============================================================
+-- PROGRESS BAR
+-- ============================================================
+local function UpdateProgress(targetPct)
+    local barInfo = TweenInfo.new(0.65, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    Tween(BarFillObj, barInfo, { Size = UDim2.new(targetPct, 0, 1, 0) })
+
+    local startPct = State.progress
+    local diff     = targetPct - startPct
+    local steps    = 40
+    task.spawn(function()
+        for i = 1, steps do
+            local val = startPct + diff * (i / steps)
+            PctLabel.Text = math.floor(val * 100) .. "%"
+            task.wait(0.65 / steps)
+        end
+        PctLabel.Text = math.floor(targetPct * 100) .. "%"
+    end)
+
+    State.progress = targetPct
+end
+
+-- ============================================================
+-- SOUNDS
+-- ============================================================
+local LoadSound, FinishSound
+local function SetupSounds()
+    LoadSound = Instance.new("Sound")
+    LoadSound.SoundId  = CONFIG.LoadSoundId
+    LoadSound.Volume   = 0.30
+    LoadSound.Looped   = true
+    LoadSound.Parent   = SoundService
+    LoadSound:Play()
+
+    FinishSound = Instance.new("Sound")
+    FinishSound.SoundId = CONFIG.FinishSoundId
+    FinishSound.Volume  = 0.65
+    FinishSound.Looped  = false
+    FinishSound.Parent  = SoundService
+end
+
+-- ============================================================
+-- EXECUTE SCRIPT
+-- ============================================================
+local function ExecuteScript()
+    local url = CONFIG.ScriptURL
+    if url == "YOUR_SCRIPT_URL_HERE" or url == "" then
+        warn("[MozCraft Loader] No script URL configured. Skipping.")
+        return
+    end
+    local ok, err = pcall(function()
+        loadstring(game:HttpGet(url, true))()
+    end)
+    if not ok then
+        warn("[MozCraft Loader] Script error: " .. tostring(err))
+    end
+end
+
+-- ============================================================
+-- FINISH — SMOOTH FULL FADE-OUT
+-- ============================================================
+local function FinishLoading()
+    State.running = false
+
+    -- Fade out ambient sound
+    if LoadSound then
+        Tween(LoadSound, TweenInfo.new(1.0, Enum.EasingStyle.Sine), { Volume = 0 })
+        task.delay(1.0, function() if LoadSound and LoadSound.Parent then LoadSound:Stop() end end)
+    end
+
+    -- Finish chime
+    if FinishSound then FinishSound:Play() end
+
+    -- Complete the bar
+    UpdateProgress(1.0)
+    StageLabel.Text = "✓  Ready!"
+    task.wait(0.7)
+
+    -- ── Full-screen black fade-out ────────────────────────
+    --  FadeOverlay sits on top of everything (ZIndex 50).
+    --  We fade it from transparent → opaque over FinishFadeTime,
+    --  creating a clean cinema-black fade-out effect.
+    local fadeInfo = TweenInfo.new(CONFIG.FinishFadeTime, Enum.EasingStyle.Sine, Enum.EasingDirection.In)
+    TweenWait(FadeOverlay, fadeInfo, { BackgroundTransparency = 0 })
+
+    -- Hold one beat at full black
+    task.wait(0.25)
+
+    -- Fade blur out (it was already mostly covered but clean it up)
+    if BlurEffect and BlurEffect.Parent then
+        BlurEffect.Size = 0
+        BlurEffect:Destroy()
+    end
+
+    -- Cleanup everything
+    if ScreenGui and ScreenGui.Parent then ScreenGui:Destroy() end
+    if LoadSound  and LoadSound.Parent  then LoadSound:Destroy()  end
+
+    -- Run external script
+    ExecuteScript()
+end
+
+-- ============================================================
+-- LOADING SEQUENCER
+-- ============================================================
+local function StartLoading()
+    -- Blur in
+    Tween(BlurEffect, TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), { Size = 18 })
+
+    -- Fade in the screen
+    TweenWait(MainFrame, TweenInfo.new(0.65, Enum.EasingStyle.Sine, Enum.EasingDirection.Out), { BackgroundTransparency = 0 })
+
+    task.wait(0.15)
+    SubtitleLabel.TextTransparency = 1
+
+    -- Entrance stagger
+    PlayEntrance()
+    task.wait(0.5)   -- let entrance settle before loops start
+
+    StartLogoAnimations()
+    StartParticles()
+    StartSlideshow()
+    StartSplashRotation()
+
+    -- Advance stages
+    for i, stage in ipairs(CONFIG.Stages) do
+        State.currentStage = i
+        StageLabel.Text    = stage.label
+        UpdateProgress(stage.pct)
+        local waitTime = (i < #CONFIG.Stages) and CONFIG.StageInterval or 0.9
+        task.wait(waitTime)
+    end
+
+    FinishLoading()
+end
+
+-- ============================================================
+-- MAIN
+-- ============================================================
+local function Main()
+    if not LocalPlayer.Character then
+        LocalPlayer.CharacterAdded:Wait()
+    end
+
+    SetupSounds()
+    CreateUI()
+    StartLoading()
+end
+
+local ok, err = pcall(Main)
+if not ok then
+    warn("[MozCraft Loader] Fatal error: " .. tostring(err))
+end
