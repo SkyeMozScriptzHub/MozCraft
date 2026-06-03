@@ -1,7 +1,7 @@
 task.spawn(function()
-    loadstring(game:HttpGet("URL_1"))()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/SkyeMozScriptzHub/MozCraft/refs/heads/main/Main/Execute/LibraryTab"))()
 end)
 
 task.spawn(function()
-    loadstring(game:HttpGet("URL_2"))()
+    loadstring(game:HttpGet(""))()
 end)
