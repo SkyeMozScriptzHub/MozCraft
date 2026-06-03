@@ -3,5 +3,5 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-    loadstring(game:HttpGet(""))()
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/SkyeMozScriptzHub/MozCraft/refs/heads/main/Main/Guis/UpdateLogs"))()
 end)
