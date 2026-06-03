@@ -1,0 +1,75 @@
+local MozCraft = loadstring(game:HttpGet("https://raw.githubusercontent.com/SkyeMoz/Mozcraft-Libary/main/Library"))()
+
+-- Tabs
+MozCraft:createTab("Main")
+MozCraft:createTab("Scripts")
+MozCraft:createTab("Hubs")
+MozCraft:createTab("Utilities")
+
+-- Main
+MozCraft:createSlot({
+    Name = "Infinite Yield",
+    Icon = "4483345998",
+    Tab = "Main",
+    Logic = "Execute",
+    Script = "https://raw.githubusercontent.com/EdgeIY/infiniteyield/master/source"
+})
+
+MozCraft:createSlot({
+    Name = "Dex Explorer",
+    Icon = "4483345998",
+    Tab = "Main",
+    Logic = "Execute",
+    Script = "https://raw.githubusercontent.com/infyiff/backup/main/dex.lua"
+})
+
+-- Scripts
+MozCraft:createSlot({
+    Name = "Copy Discord",
+    Icon = "4483345998",
+    Tab = "Scripts",
+    Logic = "Copy",
+    Script = "https://discord.gg/mozcraft"
+})
+
+MozCraft:createSlot({
+    Name = "Copy Website",
+    Icon = "4483345998",
+    Tab = "Scripts",
+    Logic = "Copy",
+    Script = "https://mozcraft.pages.dev"
+})
+
+-- Hubs
+MozCraft:createSlot({
+    Name = "Script Hub",
+    Icon = "4483345998",
+    Tab = "Hubs",
+    Logic = "Execute",
+    Script = "https://example.com/hub.lua"
+})
+
+MozCraft:createSlot({
+    Name = "Admin Hub",
+    Icon = "4483345998",
+    Tab = "Hubs",
+    Logic = "Execute",
+    Script = "https://example.com/admin.lua"
+})
+
+-- Utilities
+MozCraft:createSlot({
+    Name = "Rejoin",
+    Icon = "4483345998",
+    Tab = "Utilities",
+    Logic = "Copy",
+    Script = 'game:GetService("TeleportService"):Teleport(game.PlaceId, game.Players.LocalPlayer)'
+})
+
+MozCraft:createSlot({
+    Name = "Job ID",
+    Icon = "4483345998",
+    Tab = "Utilities",
+    Logic = "Copy",
+    Script = game.JobId
+})
