@@ -1,1 +1,747 @@
+-- ══════════════════════════════════════════════════════════════
+--  SCRIPT 3 — MAIN BLOCK PLACER  v3.8.0
+--
+--  FIXES FROM v3.7.0:
+--    FIX K  — Handle hidden in first-person via Size=Vector3.zero
+--             trick. Transparency/LocalTransparencyModifier are
+--             unreliable on Tool handles (engine resets them).
+--             Shrinking to zero size makes the part truly invisible
+--             AND removes its collision box, so it cannot be seen
+--             or touched. Restored to normal size in TP/unequipped.
+--             A dedicated RenderStepped connection enforces the
+--             size every frame so the engine cannot fight it.
+--    FIX L  — Sounds: each play call clones the Sound, plays it
+--             once, then Debris cleans it up. No waiting for the
+--             previous instance to finish — multiple sounds can
+--             overlap freely. One sound fires per place/delete.
+--    FIX M  — StringValue (Name="Type", Value="Grass") added to
+--             every placed block immediately on creation.
+-- ══════════════════════════════════════════════════════════════
 
+local Players              = game:GetService("Players")
+local RunService           = game:GetService("RunService")
+local TweenService         = game:GetService("TweenService")
+local UserInputService     = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
+local Debris               = game:GetService("Debris")
+
+-- ══════════════════════════════════════════════════════════════
+--  BINDABLE EVENTS
+-- ══════════════════════════════════════════════════════════════
+if not _G.BlockPlacerEvents then
+    _G.BlockPlacerEvents = {
+        Place       = Instance.new("BindableEvent"),
+        Break       = Instance.new("BindableEvent"),
+        Lock        = Instance.new("BindableEvent"),
+        LockChanged = Instance.new("BindableEvent"),
+    }
+end
+local Events = _G.BlockPlacerEvents
+
+-- ══════════════════════════════════════════════════════════════
+--  PERSISTENT STATE
+-- ══════════════════════════════════════════════════════════════
+_G.MCB = _G.MCB or { grid = {}, blocks = {}, lockMode = false }
+local S = _G.MCB
+
+-- ══════════════════════════════════════════════════════════════
+--  LOCALS
+-- ══════════════════════════════════════════════════════════════
+local player     = Players.LocalPlayer
+local PlayerGui  = player:WaitForChild("PlayerGui")
+local camera     = workspace.CurrentCamera
+local isEquipped = false
+
+-- ══════════════════════════════════════════════════════════════
+--  STRING VALUES
+-- ══════════════════════════════════════════════════════════════
+if not _G.BlockPlacerStringValues then _G.BlockPlacerStringValues = {} end
+
+local function getOrCreateSV(name, default)
+    if _G.BlockPlacerStringValues[name] then return _G.BlockPlacerStringValues[name] end
+    local ex = PlayerGui:FindFirstChild(name)
+    if ex and ex:IsA("StringValue") then
+        _G.BlockPlacerStringValues[name] = ex; return ex
+    end
+    local sv = Instance.new("StringValue")
+    sv.Name = name; sv.Value = default; sv.Parent = PlayerGui
+    _G.BlockPlacerStringValues[name] = sv
+    return sv
+end
+
+local SV_ToolState  = getOrCreateSV("ToolState",  "Unequipped")
+local SV_LastAction = getOrCreateSV("LastAction",  "None")
+local SV_LockState  = getOrCreateSV("LockState",   "Unlocked")
+local function setLastAction(a) SV_LastAction.Value = a end
+
+-- ══════════════════════════════════════════════════════════════
+--  CONSTANTS
+-- ══════════════════════════════════════════════════════════════
+local SNAP            = 4
+local BLOCK_SIZE      = Vector3.new(SNAP, SNAP, SNAP)
+local REACH           = 120
+local PLACE_DEBOUNCE  = 0.08
+local DELETE_DEBOUNCE = 0.08
+local TAP_THRESHOLD   = 10
+
+-- FIX L: sound IDs — 3 distinct sounds for place and delete
+local PLACE_SOUND_IDS  = {
+    "rbxassetid://137891923918460",
+    "rbxassetid://137872931202432",
+    "rbxassetid://137851335400766",
+}
+local DELETE_SOUND_IDS = {
+    "rbxassetid://137782073700276",
+    "rbxassetid://137280066138423",
+    "rbxassetid://132113571207729",
+}
+
+local TOOL_TEXTURE     = "rbxassetid://8083711385"
+
+local FACE_TEXTURES = {
+    [Enum.NormalId.Top]    = "rbxassetid://9267183930",
+    [Enum.NormalId.Bottom] = "rbxassetid://9267089500",
+    [Enum.NormalId.Front]  = "rbxassetid://9267155972",
+    [Enum.NormalId.Back]   = "rbxassetid://9267155972",
+    [Enum.NormalId.Left]   = "rbxassetid://9267155972",
+    [Enum.NormalId.Right]  = "rbxassetid://9267155972",
+}
+local FACE_TEXTURE_LIST = {
+    BLOCK_TEXTURE_ID, BLOCK_TEXTURE_ID,
+    BLOCK_TEXTURE_ID, BLOCK_TEXTURE_ID,
+    BLOCK_TEXTURE_ID, BLOCK_TEXTURE_ID,
+}
+
+-- ══════════════════════════════════════════════════════════════
+--  GRID MATH
+-- ══════════════════════════════════════════════════════════════
+local function snap1(v)   return math.floor(v/SNAP+0.5)*SNAP end
+local function snapVec(v) return Vector3.new(snap1(v.X),snap1(v.Y),snap1(v.Z)) end
+local function gridKey(pos)
+    return math.floor(pos.X/SNAP+0.5)..","..math.floor(pos.Y/SNAP+0.5)..","..math.floor(pos.Z/SNAP+0.5)
+end
+local function registerBlock(b)
+    S.grid[gridKey(b.Position)] = b; table.insert(S.blocks, b)
+end
+local function unregisterBlock(b)
+    S.grid[gridKey(b.Position)] = nil
+    for i = #S.blocks,1,-1 do if S.blocks[i]==b then table.remove(S.blocks,i) break end end
+end
+local function blockAtSnappedPos(p) return S.grid[gridKey(p)] end
+local function calcPlacementCenter(r)
+    return snapVec(snapVec(r.Position - r.Normal*(SNAP*0.5)) + r.Normal*SNAP)
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  TEXTURES
+-- ══════════════════════════════════════════════════════════════
+local function addTextures(part)
+    for face, id in pairs(FACE_TEXTURES) do
+        local t = Instance.new("Texture")
+        t.Texture=id; t.Face=face; t.StudsPerTileU=4; t.StudsPerTileV=4; t.Parent=part
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  SOUNDS  (FIX L)
+--
+--  playRandom() clones the chosen Sound into PlayerGui, plays it,
+--  then Debris destroys it after 3 s. Because every call gets its
+--  own fresh Sound instance, any number of sounds can play
+--  simultaneously with no waiting. One call fires per place/delete.
+-- ══════════════════════════════════════════════════════════════
+local function playRandom(ids)
+    local id  = ids[math.random(1, #ids)]
+    local snd = Instance.new("Sound")
+    snd.SoundId = id
+    snd.Volume  = 1
+    snd.Parent  = PlayerGui   -- needs a parent to play
+    snd:Play()
+    Debris:AddItem(snd, 3)    -- auto-cleaned up after 3 s
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  FIRST-PERSON DETECTION
+-- ══════════════════════════════════════════════════════════════
+local FP_THRESHOLD = 1.0
+local function isFirstPerson()
+    local char = player.Character
+    if not char then return false end
+    local head = char:FindFirstChild("Head")
+    if not head then return false end
+    if camera.CameraType == Enum.CameraType.Scriptable then return false end
+    return (camera.CFrame.Position - head.Position).Magnitude < FP_THRESHOLD
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  BREAK PARTICLES
+-- ══════════════════════════════════════════════════════════════
+local PARTICLE_COUNT    = 16
+local PARTICLE_LIFETIME = 0.65
+local PSIZE_MIN         = 0.22
+local PSIZE_MAX         = 0.55
+
+local function spawnBreakParticles(blockPart)
+    local origin = blockPart.Position
+    local texIds = {}
+    for _,ch in ipairs(blockPart:GetChildren()) do
+        if ch:IsA("Texture") and ch.Texture~="" then table.insert(texIds,ch.Texture) end
+    end
+    if #texIds==0 then texIds=FACE_TEXTURE_LIST end
+
+    local function rb(a,b) return a+math.random()*(b-a) end
+
+    for _=1,PARTICLE_COUNT do
+        local sz    = rb(PSIZE_MIN,PSIZE_MAX)
+        local thick = sz*rb(0.25,0.55)
+        local p     = Instance.new("Part")
+        p.Anchored=false; p.CanCollide=false; p.CanQuery=false
+        p.CastShadow=false; p.Material=Enum.Material.SmoothPlastic
+        local ax=math.random(1,3)
+        if ax==1 then p.Size=Vector3.new(thick,sz,sz)
+        elseif ax==2 then p.Size=Vector3.new(sz,thick,sz)
+        else p.Size=Vector3.new(sz,sz,thick) end
+        p.BrickColor=blockPart.BrickColor; p.Transparency=0
+        local hs=SNAP*0.5
+        p.CFrame=CFrame.new(origin.X+rb(-hs,hs),origin.Y+rb(-hs,hs),origin.Z+rb(-hs,hs))
+            *CFrame.Angles(math.random()*math.pi*2,math.random()*math.pi*2,math.random()*math.pi*2)
+
+        local texId=texIds[math.random(1,#texIds)]
+        for _,face in ipairs(Enum.NormalId:GetEnumItems()) do
+            local t=Instance.new("Texture"); t.Texture=texId; t.Face=face
+            local ts=rb(1.5,3.5); t.StudsPerTileU=ts; t.StudsPerTileV=ts
+            t.OffsetStudsU=math.random(0,3); t.OffsetStudsV=math.random(0,3); t.Parent=p
+        end
+        p.Parent=workspace
+
+        local bv=Instance.new("BodyVelocity")
+        bv.Velocity=Vector3.new(rb(-1,1),rb(0.4,1.4),rb(-1,1)).Unit*rb(8,20)
+        bv.MaxForce=Vector3.new(1e4,1e4,1e4); bv.P=1e4; bv.Parent=p
+
+        local bav=Instance.new("BodyAngularVelocity")
+        bav.AngularVelocity=Vector3.new(rb(-12,12),rb(-12,12),rb(-12,12))
+        bav.MaxTorque=Vector3.new(1e5,1e5,1e5); bav.P=1e4; bav.Parent=p
+
+        local lifetime=PARTICLE_LIFETIME*rb(0.7,1.3)
+        task.spawn(function()
+            task.wait(0.08)
+            if bv.Parent then bv:Destroy() end
+            local fadeTime=lifetime-0.08; local t0=tick(); local conn
+            conn=RunService.Heartbeat:Connect(function()
+                if not p or not p.Parent then conn:Disconnect() return end
+                local alpha=math.clamp((tick()-t0)/fadeTime,0,1)
+                p.Transparency=alpha
+                if alpha>=1 then conn:Disconnect(); p:Destroy() end
+            end)
+        end)
+        Debris:AddItem(p,lifetime+0.5)
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  VIEWMODEL  (ViewportFrame approach — unchanged from v3.7)
+-- ══════════════════════════════════════════════════════════════
+
+if _G.MCB_VM_Gui and _G.MCB_VM_Gui.Parent then
+    _G.MCB_VM_Gui:Destroy()
+end
+if _G.MCB_RenderConn then
+    _G.MCB_RenderConn:Disconnect()
+    _G.MCB_RenderConn = nil
+end
+
+local vmGui = Instance.new("ScreenGui")
+vmGui.Name             = "BlockPlacer_VM"
+vmGui.ResetOnSpawn     = false
+vmGui.IgnoreGuiInset   = true
+vmGui.ZIndexBehavior   = Enum.ZIndexBehavior.Sibling
+vmGui.DisplayOrder     = 10
+vmGui.Enabled          = false
+vmGui.Parent           = PlayerGui
+_G.MCB_VM_Gui          = vmGui
+
+local vf = Instance.new("ViewportFrame")
+vf.Size                   = UDim2.new(1,0,1,0)
+vf.Position               = UDim2.new(0,0,0,0)
+vf.BackgroundTransparency = 1
+vf.BorderSizePixel        = 0
+vf.Ambient                = Color3.new(1,1,1)
+vf.LightDirection         = Vector3.new(-1,-2,-1)
+vf.Parent                 = vmGui
+
+local vfWorld = Instance.new("WorldModel")
+vfWorld.Parent = vf
+
+local vmPart = Instance.new("Part")
+vmPart.Name       = "VM_Block"
+vmPart.Size       = Vector3.new(1.4,1.4,1.4)
+vmPart.Anchored   = true
+vmPart.CanCollide = false
+vmPart.Material   = Enum.Material.SmoothPlastic
+vmPart.BrickColor = BrickColor.new("Bright green")
+vmPart.Parent     = vfWorld
+addTextures(vmPart)
+
+for _,tex in ipairs(vmPart:GetChildren()) do
+    if tex:IsA("Texture") then
+        tex.StudsPerTileU = 1
+        tex.StudsPerTileV = 1
+    end
+end
+
+_G.MCB_ViewModel = vmPart
+
+local vfCam = Instance.new("Camera")
+vfCam.FieldOfView = 70
+vfCam.Parent      = vf
+vf.CurrentCamera  = vfCam
+
+local VM_BASE_CF = CFrame.new(1.45,-1.25,-2.2)
+               * CFrame.Angles(math.rad(15),math.rad(-35),math.rad(20))
+
+local vmSwingActive = false
+local vmSwingOffset = CFrame.new()
+local vmIdleTime    = 0
+local vmBobOffset   = CFrame.new()
+
+local function vmLerp(startCF, targetCF, dur)
+    local t0=tick()
+    while true do
+        local a=math.min((tick()-t0)/dur,1)
+        local e=a*a*(3-2*a)
+        vmSwingOffset=startCF:Lerp(targetCF,e)
+        if a>=1 then break end
+        RunService.RenderStepped:Wait()
+    end
+end
+
+local function vmPlaySwing()
+    if vmSwingActive then return end
+    vmSwingActive=true
+    task.spawn(function()
+        vmLerp(CFrame.new(),
+            CFrame.new(0.35,0.1,0.3)*CFrame.Angles(math.rad(-25),math.rad(18),math.rad(-10)),0.08)
+        vmLerp(vmSwingOffset,
+            CFrame.new(0.55,-0.85,0.1)*CFrame.Angles(math.rad(55),math.rad(22),math.rad(5)),0.11)
+        vmLerp(vmSwingOffset,CFrame.new(),0.16)
+        vmSwingOffset=CFrame.new(); vmSwingActive=false
+    end)
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  HANDLE  (FIX K)
+--
+--  The ONLY reliable way to hide a Tool Handle in first-person
+--  on Roblox is to shrink it to a zero/tiny size. Transparency
+--  and LocalTransparencyModifier are both reset by the engine
+--  every frame for equipped tool handles.
+--
+--  Strategy:
+--    FP + equipped  → handle.Size = Vector3.new(0,0,0)
+--                     (invisible, no collision, no shadow)
+--    TP / unequipped → handle.Size = HANDLE_REAL_SIZE
+--
+--  Enforced every RenderStepped frame so the engine can never win.
+-- ══════════════════════════════════════════════════════════════
+local HANDLE_REAL_SIZE = Vector3.new(1,1,1)
+local HANDLE_ZERO_SIZE = Vector3.new(0,0,0)
+
+local handle  -- assigned below after tool construction
+
+local function updateHandleVisibility()
+    if not handle or not handle.Parent then return end
+    if isEquipped and isFirstPerson() then
+        -- Shrink to zero — the only engine-proof hide for tool handles
+        if handle.Size ~= HANDLE_ZERO_SIZE then
+            handle.Size = HANDLE_ZERO_SIZE
+        end
+    else
+        -- Restore real size in third-person or when unequipped
+        if handle.Size ~= HANDLE_REAL_SIZE then
+            handle.Size = HANDLE_REAL_SIZE
+        end
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  RENDERSTEP — single loop for VM + handle
+-- ══════════════════════════════════════════════════════════════
+_G.MCB_RenderConn = RunService.RenderStepped:Connect(function(dt)
+    local fp = isFirstPerson()
+
+    -- ViewportFrame visible only in FP + equipped
+    vmGui.Enabled = isEquipped and fp
+
+    -- FIX K: enforce handle size every frame
+    updateHandleVisibility()
+
+    if not (isEquipped and fp) then return end
+
+    -- Mirror VF camera to main camera
+    vfCam.CFrame      = camera.CFrame
+    vfCam.FieldOfView = camera.FieldOfView
+
+    -- Idle sway + walk bob
+    local char     = player.Character
+    local rootPart = char and char:FindFirstChild("HumanoidRootPart")
+    local speed    = 0
+    if rootPart then
+        local vel=rootPart.Velocity
+        speed=Vector2.new(vel.X,vel.Z).Magnitude
+    end
+
+    vmIdleTime = vmIdleTime + dt
+    local swayX = math.sin(vmIdleTime*0.9)*0.025
+    local swayY = math.sin(vmIdleTime*1.4)*0.012
+    local idleCF = CFrame.new(swayX,swayY,0)
+
+    local bobAmt = math.clamp(speed/16,0,1)
+    local bobX   = math.sin(vmIdleTime*8.5)           * 0.09 * bobAmt
+    local bobY   = math.abs(math.sin(vmIdleTime*8.5)) * 0.07 * bobAmt
+    vmBobOffset  = CFrame.new(bobX,-bobY,0)
+
+    vmPart.CFrame = camera.CFrame * VM_BASE_CF * idleCF * vmBobOffset * vmSwingOffset
+end)
+
+-- ══════════════════════════════════════════════════════════════
+--  CHARACTER ARM SWING
+-- ══════════════════════════════════════════════════════════════
+local rightShoulder, defaultC0
+local swingActive = false
+
+local function setupArm()
+    local char    = player.Character or player.CharacterAdded:Wait()
+    local human   = char:WaitForChild("Humanoid")
+    if human.RigType == Enum.HumanoidRigType.R15 then
+        local upper = char:WaitForChild("RightUpperArm",3)
+        rightShoulder = upper and upper:FindFirstChild("RightShoulder")
+    else
+        local torso = char:WaitForChild("Torso",3)
+        rightShoulder = torso and torso:FindFirstChild("Right Shoulder")
+    end
+    if rightShoulder then defaultC0=rightShoulder.C0 end
+end
+setupArm()
+
+local function smoothTween(joint,goal,dur,style)
+    style=style or Enum.EasingStyle.Sine
+    TweenService:Create(joint,TweenInfo.new(dur,style,Enum.EasingDirection.Out),{C0=goal}):Play()
+end
+
+local function playHandSwing()
+    if not rightShoulder or not defaultC0 or swingActive then return end
+    swingActive=true
+    task.spawn(function()
+        smoothTween(rightShoulder,
+            defaultC0*CFrame.Angles(math.rad(-20),math.rad(15),math.rad(-8)),0.08,Enum.EasingStyle.Sine)
+        task.wait(0.08)
+        smoothTween(rightShoulder,
+            defaultC0*CFrame.Angles(math.rad(65),math.rad(18),math.rad(10)),0.11,Enum.EasingStyle.Quad)
+        task.wait(0.11)
+        smoothTween(rightShoulder,defaultC0,0.16,Enum.EasingStyle.Sine)
+        task.wait(0.16)
+        swingActive=false
+    end)
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  CROSSHAIR
+-- ══════════════════════════════════════════════════════════════
+do
+    local cg=PlayerGui:FindFirstChild("BlockPlacer_Crosshair")
+    if cg then cg:Destroy() end
+end
+
+local crosshairGui=Instance.new("ScreenGui")
+crosshairGui.Name="BlockPlacer_Crosshair"; crosshairGui.ResetOnSpawn=false
+crosshairGui.IgnoreGuiInset=true; crosshairGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+crosshairGui.Parent=PlayerGui
+
+local function makeLine(w,h)
+    local f=Instance.new("Frame")
+    f.AnchorPoint=Vector2.new(0.5,0.5); f.Position=UDim2.new(0.5,0,0.5,0)
+    f.Size=UDim2.new(0,w,0,h); f.BackgroundColor3=Color3.new(1,1,1)
+    f.BackgroundTransparency=0.15; f.BorderSizePixel=0; f.Parent=crosshairGui
+    return f
+end
+local chH=makeLine(18,2); local chV=makeLine(2,18)
+local function setCrosshairVisible(v) chH.Visible=v; chV.Visible=v end
+setCrosshairVisible(false)
+
+-- ══════════════════════════════════════════════════════════════
+--  RAYCAST
+-- ══════════════════════════════════════════════════════════════
+local rayParams=RaycastParams.new()
+rayParams.FilterType=Enum.RaycastFilterType.Blacklist
+
+local function buildFilter()
+    local f={}
+    if player.Character then f[1]=player.Character end
+    rayParams.FilterDescendantsInstances=f
+end
+
+local function doRaycast()
+    buildFilter()
+    if S.lockMode then
+        local char=player.Character
+        local head=char and char:FindFirstChild("Head")
+        local origin=head and head.Position or camera.CFrame.Position
+        return workspace:Raycast(origin,camera.CFrame.LookVector*REACH,rayParams)
+    else
+        local mouse=player:GetMouse()
+        local origin=camera.CFrame.Position
+        local dir=(mouse.Hit.Position-origin).Unit*REACH
+        return workspace:Raycast(origin,dir,rayParams)
+    end
+end
+
+local function doRaycastFromScreen(screenPos)
+    buildFilter()
+    local ur=camera:ScreenPointToRay(screenPos.X,screenPos.Y)
+    return workspace:Raycast(ur.Origin,ur.Direction*REACH,rayParams)
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  OVERLAP CHECK
+-- ══════════════════════════════════════════════════════════════
+local function overlapsPlayer(center)
+    local char=player.Character; if not char then return false end
+    local hx,hy,hz=SNAP*0.5,SNAP*0.5,SNAP*0.5
+    for _,part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            local d=part.Position-center
+            if math.abs(d.X)<part.Size.X*0.5+hx
+            and math.abs(d.Y)<part.Size.Y*0.5+hy
+            and math.abs(d.Z)<part.Size.Z*0.5+hz then return true end
+        end
+    end
+    return false
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  CORE ACTIONS
+-- ══════════════════════════════════════════════════════════════
+local lastPlaced=0; local lastDeleted=0
+
+local function spawnBlock(result)
+    if not result then return end
+    local center=calcPlacementCenter(result)
+    if blockAtSnappedPos(center) then return end
+    if overlapsPlayer(center) then return end
+
+    task.spawn(playHandSwing); task.spawn(vmPlaySwing)
+
+    local block=Instance.new("Part")
+    block.Size=BLOCK_SIZE; block.Anchored=true; block.CanCollide=true
+    block.Material=Enum.Material.SmoothPlastic; block.BrickColor=BrickColor.new("Bright green")
+    block.CFrame=CFrame.new(center); block.Name="ClientBlock"; block.Parent=workspace
+    addTextures(block)
+
+    -- FIX M: tag every block with Type = "Grass"
+    local sv = Instance.new("StringValue")
+    sv.Name   = "Type"
+    sv.Value  = "Grass"
+    sv.Parent = block
+
+    registerBlock(block)
+
+    -- FIX L: fire-and-forget sound — one sound per place
+    playRandom(PLACE_SOUND_IDS)
+    setLastAction("Place")
+
+    block.Size=BLOCK_SIZE*0.55
+    local tw1=TweenService:Create(block,
+        TweenInfo.new(0.13,Enum.EasingStyle.Back,Enum.EasingDirection.Out),{Size=BLOCK_SIZE*1.08})
+    tw1:Play()
+    tw1.Completed:Connect(function()
+        if block and block.Parent then
+            TweenService:Create(block,TweenInfo.new(0.07),{Size=BLOCK_SIZE}):Play()
+        end
+    end)
+end
+
+local function placeBlock(screenPos)
+    if not isEquipped then return end
+    if tick()-lastPlaced<PLACE_DEBOUNCE then return end
+    lastPlaced=tick()
+    spawnBlock(screenPos and doRaycastFromScreen(screenPos) or doRaycast())
+end
+
+local function deleteBlock()
+    if not isEquipped then return end
+    if tick()-lastDeleted<DELETE_DEBOUNCE then return end
+    lastDeleted=tick()
+    local result=doRaycast()
+    if not result or not result.Instance then return end
+    local target=result.Instance
+    if target.Name~="ClientBlock" then return end
+    task.spawn(playHandSwing); task.spawn(vmPlaySwing)
+
+    -- FIX L: fire-and-forget sound — one sound per delete
+    playRandom(DELETE_SOUND_IDS)
+    unregisterBlock(target); setLastAction("Break")
+    spawnBreakParticles(target)
+    local tw=TweenService:Create(target,
+        TweenInfo.new(0.06,Enum.EasingStyle.Quad,Enum.EasingDirection.In),
+        {Size=BLOCK_SIZE*0.05,Transparency=0.8})
+    tw:Play()
+    tw.Completed:Connect(function() if target and target.Parent then target:Destroy() end end)
+end
+
+local function toggleLock()
+    S.lockMode=not S.lockMode
+    SV_LockState.Value=S.lockMode and "Locked" or "Unlocked"
+    setLastAction("Lock"); setCrosshairVisible(S.lockMode)
+    Events.LockChanged:Fire(S.lockMode)
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  EVENT LISTENERS
+-- ══════════════════════════════════════════════════════════════
+local eventConns={}
+local function disconnectEventListeners()
+    for _,c in ipairs(eventConns) do pcall(function() c:Disconnect() end) end
+    eventConns={}
+end
+local function connectEventListeners()
+    disconnectEventListeners()
+    eventConns[1]=Events.Place.Event:Connect(function() placeBlock(nil) end)
+    eventConns[2]=Events.Break.Event:Connect(deleteBlock)
+    eventConns[3]=Events.Lock.Event:Connect(toggleLock)
+end
+connectEventListeners()
+
+-- ══════════════════════════════════════════════════════════════
+--  MOBILE TOUCH
+-- ══════════════════════════════════════════════════════════════
+if UserInputService.TouchEnabled then
+    local activeTouches={}
+    UserInputService.TouchStarted:Connect(function(inp,gp)
+        if gp then return end; activeTouches[inp]=inp.Position
+    end)
+    UserInputService.TouchEnded:Connect(function(inp,gp)
+        if gp then return end
+        local sp=activeTouches[inp]; activeTouches[inp]=nil
+        if not sp then return end
+        if (inp.Position-sp).Magnitude<TAP_THRESHOLD then
+            if not S.lockMode and isEquipped then placeBlock(inp.Position) end
+        end
+    end)
+end
+
+-- ══════════════════════════════════════════════════════════════
+--  TOOL + HANDLE CONSTRUCTION
+-- ══════════════════════════════════════════════════════════════
+local tool=Instance.new("Tool")
+tool.Name="Acacia Block"; tool.RequiresHandle=true
+tool.TextureId=TOOL_TEXTURE; tool.Parent=player:WaitForChild("Backpack")
+
+-- FIX K: handle declared here so updateHandleVisibility upvalue resolves
+handle=Instance.new("Part")
+handle.Name       = "Handle"
+handle.Size       = HANDLE_REAL_SIZE   -- starts at full size
+handle.Anchored   = false
+handle.CanCollide = true
+handle.Material   = Enum.Material.SmoothPlastic
+handle.BrickColor = BrickColor.new("Bright green")
+handle.Parent     = tool
+addTextures(handle)
+
+for _,tex in ipairs(handle:GetChildren()) do
+    if tex:IsA("Texture") then
+        tex.StudsPerTileU = 1
+        tex.StudsPerTileV = 1
+    end
+end
+
+
+tool.GripPos     = Vector3.new(0,0,0)
+tool.GripForward = Vector3.new(0,0,-1)
+tool.GripUp      = Vector3.new(0,1,0)
+tool.GripRight   = Vector3.new(1,0,0)
+
+-- ══════════════════════════════════════════════════════════════
+--  EQUIPPED / UNEQUIPPED
+-- ══════════════════════════════════════════════════════════════
+tool.Equipped:Connect(function()
+    isEquipped=true; SV_ToolState.Value="Equipped"
+    connectEventListeners()
+    -- Handle size managed by RenderStepped from this point on
+end)
+
+tool.Unequipped:Connect(function()
+    isEquipped=false; SV_ToolState.Value="Unequipped"
+    swingActive=false; vmSwingOffset=CFrame.new(); vmSwingActive=false
+    vmGui.Enabled=false
+    -- Immediately restore handle to full size on unequip
+    if handle and handle.Parent then
+        handle.Size = HANDLE_REAL_SIZE
+    end
+    if rightShoulder and defaultC0 then
+        TweenService:Create(rightShoulder,
+            TweenInfo.new(0.12,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),
+            {C0=defaultC0}):Play()
+    end
+end)
+
+-- ══════════════════════════════════════════════════════════════
+--  RESPAWN
+-- ══════════════════════════════════════════════════════════════
+player.CharacterAdded:Connect(function()
+    isEquipped=false; swingActive=false
+    vmSwingOffset=CFrame.new(); vmSwingActive=false
+    vmGui.Enabled=false
+    camera=workspace.CurrentCamera
+    setupArm(); connectEventListeners(); setCrosshairVisible(S.lockMode)
+    -- Restore handle size on respawn
+    if handle and handle.Parent then
+        handle.Size = HANDLE_REAL_SIZE
+    end
+end)
+
+-- ══════════════════════════════════════════════════════════════
+--  PC KEYBINDS
+-- ══════════════════════════════════════════════════════════════
+local function bind(key,fn)
+    ContextActionService:BindActionAtPriority(
+        tostring(key),fn,false,Enum.ContextActionPriority.Default.Value,key)
+end
+bind(Enum.KeyCode.E,function(_,state) if state==Enum.UserInputState.Begin then placeBlock(nil) end end)
+bind(Enum.KeyCode.R,function(_,state) if state==Enum.UserInputState.Begin then deleteBlock() end end)
+bind(Enum.KeyCode.Q,function(_,state) if state~=Enum.UserInputState.Begin then return end toggleLock() end)
+bind(Enum.KeyCode.Z,function(_,state)
+    if state~=Enum.UserInputState.Begin then return end
+    local char=player.Character
+    if char and char:FindFirstChildOfClass("Tool") then
+        local h=char:FindFirstChildOfClass("Humanoid"); if h then h:UnequipTools() end
+    else
+        if tool.Parent~=player.Backpack then tool.Parent=player.Backpack end
+    end
+end)
+
+tool.Activated:Connect(function()
+    if UserInputService.TouchEnabled and not UserInputService.MouseEnabled then return end
+    placeBlock(nil)
+end)
+
+UserInputService.InputBegan:Connect(function(inp,gp)
+    if gp then return end
+    if inp.UserInputType~=Enum.UserInputType.MouseButton2 then return end
+    if tool.Parent~=player.Character then return end
+    deleteBlock()
+end)
+
+-- ══════════════════════════════════════════════════════════════
+--  CLEANUP
+-- ══════════════════════════════════════════════════════════════
+player.AncestryChanged:Connect(function()
+    if player:IsDescendantOf(game) then return end
+    pcall(function()
+        disconnectEventListeners()
+        if _G.MCB_RenderConn then _G.MCB_RenderConn:Disconnect(); _G.MCB_RenderConn=nil end
+        if _G.MCB_VM_Gui and _G.MCB_VM_Gui.Parent then _G.MCB_VM_Gui:Destroy() end
+        for _,k in ipairs({Enum.KeyCode.E,Enum.KeyCode.R,Enum.KeyCode.Q,Enum.KeyCode.Z}) do
+            ContextActionService:UnbindAction(tostring(k))
+        end
+    end)
+end)
